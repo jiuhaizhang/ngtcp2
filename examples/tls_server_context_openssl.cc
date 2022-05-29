@@ -37,6 +37,11 @@
 
 extern Config config;
 
+ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+  auto h = static_cast<HandlerBase *>(conn_ref->user_data);
+  return h->conn();
+}
+
 TLSServerContext::TLSServerContext() : ssl_ctx_{nullptr} {}
 
 TLSServerContext::~TLSServerContext() {
@@ -51,7 +56,8 @@ namespace {
 int alpn_select_proto_h3_cb(SSL *ssl, const unsigned char **out,
                             unsigned char *outlen, const unsigned char *in,
                             unsigned int inlen, void *arg) {
-  auto h = static_cast<HandlerBase *>(SSL_get_app_data(ssl));
+  auto conn_ref = static_cast<ngtcp2_crypto_conn_ref *>(SSL_get_app_data(ssl));
+  auto h = static_cast<HandlerBase *>(conn_ref->user_data);
   const uint8_t *alpn;
   size_t alpnlen;
   // This should be the negotiated version, but we have not set the
@@ -108,7 +114,8 @@ namespace {
 int alpn_select_proto_hq_cb(SSL *ssl, const unsigned char **out,
                             unsigned char *outlen, const unsigned char *in,
                             unsigned int inlen, void *arg) {
-  auto h = static_cast<HandlerBase *>(SSL_get_app_data(ssl));
+  auto conn_ref = static_cast<ngtcp2_crypto_conn_ref *>(SSL_get_app_data(ssl));
+  auto h = static_cast<HandlerBase *>(conn_ref->user_data);
   const uint8_t *alpn;
   size_t alpnlen;
   // This should be the negotiated version, but we have not set the
@@ -185,64 +192,6 @@ int alpn_select_proto_perf_cb(SSL *ssl, const unsigned char **out,
 } // namespace
 
 namespace {
-int set_encryption_secrets(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
-                           const uint8_t *read_secret,
-                           const uint8_t *write_secret, size_t secret_len) {
-  auto h = static_cast<HandlerBase *>(SSL_get_app_data(ssl));
-  auto level = ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
-
-  if (auto rv = h->on_rx_key(level, read_secret, secret_len); rv != 0) {
-    return 0;
-  }
-  if (write_secret) {
-    if (auto rv = h->on_tx_key(level, write_secret, secret_len); rv != 0) {
-      return 0;
-    }
-
-    if (level == NGTCP2_CRYPTO_LEVEL_APPLICATION &&
-        h->call_application_tx_key_cb() != 0) {
-      return 0;
-    }
-  }
-
-  return 1;
-}
-} // namespace
-
-namespace {
-int add_handshake_data(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
-                       const uint8_t *data, size_t len) {
-  auto h = static_cast<HandlerBase *>(SSL_get_app_data(ssl));
-  auto level = ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
-  if (h->write_server_handshake(level, data, len) != 0) {
-    return 0;
-  }
-  return 1;
-}
-} // namespace
-
-namespace {
-int flush_flight(SSL *ssl) { return 1; }
-} // namespace
-
-namespace {
-int send_alert(SSL *ssl, enum ssl_encryption_level_t level, uint8_t alert) {
-  auto h = static_cast<HandlerBase *>(SSL_get_app_data(ssl));
-  h->set_tls_alert(alert);
-  return 1;
-}
-} // namespace
-
-namespace {
-auto quic_method = SSL_QUIC_METHOD{
-    set_encryption_secrets,
-    add_handshake_data,
-    flush_flight,
-    send_alert,
-};
-} // namespace
-
-namespace {
 int verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
   // We don't verify the client certificate.  Just request it for the
   // testing purpose.
@@ -253,11 +202,19 @@ int verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
 int TLSServerContext::init(const char *private_key_file, const char *cert_file,
                            AppProtocol app_proto) {
   constexpr static unsigned char sid_ctx[] = "ngtcp2 server";
+  int rv;
 
   ssl_ctx_ = SSL_CTX_new(TLS_server_method());
   if (!ssl_ctx_) {
     std::cerr << "SSSL_CTX_new: " << ERR_error_string(ERR_get_error(), nullptr)
               << std::endl;
+    return -1;
+  }
+
+  rv = ngtcp2_crypto_openssl_configure_server_context(ssl_ctx_);
+  if (rv != 0) {
+    std::cerr << "ngtcp2_crypto_openssl_configure_server_ssl_ctx: "
+              << ngtcp2_strerror(rv) << std::endl;
     return -1;
   }
 
@@ -280,9 +237,6 @@ int TLSServerContext::init(const char *private_key_file, const char *cert_file,
   }
 
   SSL_CTX_set_mode(ssl_ctx_, SSL_MODE_RELEASE_BUFFERS);
-
-  SSL_CTX_set_min_proto_version(ssl_ctx_, TLS1_3_VERSION);
-  SSL_CTX_set_max_proto_version(ssl_ctx_, TLS1_3_VERSION);
 
   switch (app_proto) {
   case AppProtocol::H3:
@@ -325,9 +279,6 @@ int TLSServerContext::init(const char *private_key_file, const char *cert_file,
                            SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
                        verify_cb);
   }
-
-  SSL_CTX_set_max_early_data(ssl_ctx_, std::numeric_limits<uint32_t>::max());
-  SSL_CTX_set_quic_method(ssl_ctx_, &quic_method);
 
   return 0;
 }

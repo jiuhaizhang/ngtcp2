@@ -37,6 +37,11 @@
 
 extern Config config;
 
+ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+  auto c = static_cast<ClientBase *>(conn_ref->user_data);
+  return c->conn();
+}
+
 TLSClientContext::TLSClientContext() : ssl_ctx_{nullptr} {}
 
 TLSClientContext::~TLSClientContext() {
@@ -67,67 +72,10 @@ int new_session_cb(SSL *ssl, SSL_SESSION *session) {
 }
 } // namespace
 
-namespace {
-int set_encryption_secrets(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
-                           const uint8_t *read_secret,
-                           const uint8_t *write_secret, size_t secret_len) {
-  auto c = static_cast<ClientBase *>(SSL_get_app_data(ssl));
-  auto level = ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
-
-  if (read_secret) {
-    if (c->on_rx_key(level, read_secret, secret_len) != 0) {
-      return 0;
-    }
-
-    if (level == NGTCP2_CRYPTO_LEVEL_APPLICATION &&
-        c->call_application_rx_key_cb() != 0) {
-      return 0;
-    }
-  }
-
-  if (c->on_tx_key(level, write_secret, secret_len) != 0) {
-    return 0;
-  }
-
-  return 1;
-}
-} // namespace
-
-namespace {
-int add_handshake_data(SSL *ssl, OSSL_ENCRYPTION_LEVEL ossl_level,
-                       const uint8_t *data, size_t len) {
-  auto c = static_cast<ClientBase *>(SSL_get_app_data(ssl));
-  auto level = ngtcp2_crypto_openssl_from_ossl_encryption_level(ossl_level);
-  if (c->write_client_handshake(level, data, len) != 0) {
-    return 0;
-  }
-  return 1;
-}
-} // namespace
-
-namespace {
-int flush_flight(SSL *ssl) { return 1; }
-} // namespace
-
-namespace {
-int send_alert(SSL *ssl, enum ssl_encryption_level_t level, uint8_t alert) {
-  auto c = static_cast<ClientBase *>(SSL_get_app_data(ssl));
-  c->set_tls_alert(alert);
-  return 1;
-}
-} // namespace
-
-namespace {
-auto quic_method = SSL_QUIC_METHOD{
-    set_encryption_secrets,
-    add_handshake_data,
-    flush_flight,
-    send_alert,
-};
-} // namespace
-
 int TLSClientContext::init(const char *private_key_file,
                            const char *cert_file) {
+  int rv;
+
   ssl_ctx_ = SSL_CTX_new(TLS_client_method());
   if (!ssl_ctx_) {
     std::cerr << "SSL_CTX_new: " << ERR_error_string(ERR_get_error(), nullptr)
@@ -135,8 +83,12 @@ int TLSClientContext::init(const char *private_key_file,
     return -1;
   }
 
-  SSL_CTX_set_min_proto_version(ssl_ctx_, TLS1_3_VERSION);
-  SSL_CTX_set_max_proto_version(ssl_ctx_, TLS1_3_VERSION);
+  rv = ngtcp2_crypto_openssl_configure_client_context(ssl_ctx_);
+  if (rv != 0) {
+    std::cerr << "ngtcp2_crypto_openssl_configure_client_ssl_ctx: "
+              << ngtcp2_strerror(rv) << std::endl;
+    return -1;
+  }
 
   SSL_CTX_set_default_verify_paths(ssl_ctx_);
 
@@ -165,8 +117,6 @@ int TLSClientContext::init(const char *private_key_file,
       return -1;
     }
   }
-
-  SSL_CTX_set_quic_method(ssl_ctx_, &quic_method);
 
   if (config.session_file) {
     SSL_CTX_set_session_cache_mode(

@@ -29,8 +29,7 @@
 #include <iostream>
 #include <fstream>
 
-#include <ngtcp2/ngtcp2_crypto.h>
-
+#include "tls_client_context.h"
 #include "debug.h"
 #include "template.h"
 #include "util.h"
@@ -39,7 +38,8 @@ using namespace ngtcp2;
 
 extern Config config;
 
-ClientBase::ClientBase() : qlog_(nullptr), conn_(nullptr), tls_alert_(0) {
+ClientBase::ClientBase()
+    : conn_ref_{get_conn, this}, qlog_(nullptr), conn_(nullptr) {
   ngtcp2_connection_close_error_default(&last_error_);
 }
 
@@ -261,23 +261,6 @@ int ClientBase::on_tx_key(ngtcp2_crypto_level level, const uint8_t *secret,
   return 0;
 }
 
-int ClientBase::write_client_handshake(ngtcp2_crypto_level level,
-                                       const uint8_t *data, size_t datalen) {
-  auto rv = ngtcp2_conn_submit_crypto_data(conn_, level, data, datalen);
-  if (rv != 0) {
-    std::cerr << "ngtcp2_conn_submit_crypto_data: " << ngtcp2_strerror(rv)
-              << std::endl;
-
-    ngtcp2_conn_set_tls_error(conn_, rv);
-
-    return -1;
-  }
-
-  return 0;
-}
-
-void ClientBase::set_tls_alert(uint8_t alert) { tls_alert_ = alert; }
-
 ngtcp2_conn *ClientBase::conn() const { return conn_; }
 
 void qlog_write_cb(void *user_data, uint32_t flags, const void *data,
@@ -298,8 +281,4 @@ int ClientBase::call_application_rx_key_cb() const {
   return application_rx_key_cb_();
 }
 
-void ClientBase::process_unhandled_tls_alert() {
-  if (auto alert = tls_session_.get_tls_alert(); alert) {
-    set_tls_alert(alert);
-  }
-}
+ngtcp2_crypto_conn_ref *ClientBase::conn_ref() { return &conn_ref_; }

@@ -33,6 +33,11 @@
 
 extern Config config;
 
+ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+  auto h = static_cast<HandlerBase *>(conn_ref->user_data);
+  return h->conn();
+}
+
 namespace {
 int anti_replay_db_add_func(void *dbf, time_t exp_time,
                             const gnutls_datum_t *key,

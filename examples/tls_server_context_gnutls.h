@@ -29,11 +29,15 @@
 #  include <config.h>
 #endif // HAVE_CONFIG_H
 
+#include <ngtcp2/ngtcp2_crypto.h>
+
 #include <gnutls/gnutls.h>
 
 #include "shared.h"
 
 using namespace ngtcp2;
+
+ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref);
 
 class TLSServerContext {
 public:

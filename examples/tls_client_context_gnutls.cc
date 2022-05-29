@@ -35,6 +35,11 @@
 
 extern Config config;
 
+ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+  auto c = static_cast<ClientBase *>(conn_ref->user_data);
+  return c->conn();
+}
+
 TLSClientContext::TLSClientContext() : cred_{nullptr} {}
 
 TLSClientContext::~TLSClientContext() {
